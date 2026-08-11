@@ -24,6 +24,8 @@ The claims worth attacking, stated as things to falsify. In short:
   that can reach it should still be refused.
 - A device id supplied by a relay never becomes a filesystem path.
 - Text a peer wrote reaches a model's context as fenced, marked data.
+- A removed device cannot read the successor room, and a non-admin's role
+  or removal record changes nothing on any member's machine.
 
 Something that breaks one of those is a vulnerability. So is anything that gets
 code execution out of a config value, a frame, or a remote URL.
@@ -35,7 +37,14 @@ will be closed as such:
 
 - **No forward secrecy.** One long-lived room key. Anyone holding the invite can
   read that room's past and future until the secret changes.
-- **No way to remove a member** except changing the secret and re-inviting.
+- **Removal exists, with sharp edges stated.** An admin can remove a member
+  (rooms created on v2.3+): the room rekeys to a successor the removed
+  device cannot read, and the removed member is told. Still no forward
+  secrecy: they keep everything already read. Any admin can remove anyone,
+  including the creator -- admin is a large grant, given to people you
+  trust. Eviction is cryptographic, not infrastructural: revoke the
+  person's carrier repo access too, and the tool reminds you. Rooms from
+  before v2.3 need recreating to get this.
 - **The carrier learns the social graph**: which devices talk to which rooms,
   when, and how much. A git host keeps it. This is why the repo must be private.
 - **Transcripts are plain text** in `.conv/` on every member's machine.

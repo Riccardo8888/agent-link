@@ -105,6 +105,34 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "link_role",
+        "description": "Make a member admin, or member again. Admins only; "
+                       "v2.3+ rooms only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "device": {"type": "string", "description": "Device id, or name if unambiguous."},
+                "role": {"type": "string", "enum": ["admin", "member"]},
+                "room": _ROOM,
+            },
+            "required": ["device", "role"],
+        },
+    },
+    {
+        "name": "link_remove",
+        "description": "Remove a member: rekeys the room so their device reads "
+                       "nothing new, and tells them. Admins only. Revoke their "
+                       "carrier repo access too.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "device": {"type": "string", "description": "Device id, or name if unambiguous."},
+                "room": _ROOM,
+            },
+            "required": ["device"],
+        },
+    },
+    {
         "name": "link_send",
         "description": "Send a message to a room. NON-BLOCKING: returns immediately, and "
                        "queues if nobody is reachable, so it is always safe to call. Use it "
@@ -209,6 +237,8 @@ _TOOL_OPS = {
     "link_status": "status",
     "link_join": "join",
     "link_grant": "grant",
+    "link_role": "role",
+    "link_remove": "remove",
     "link_send": "send",
     "link_inbox": "inbox",
     "link_read": "read",
@@ -265,7 +295,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     # deadline so we read its answer rather than tripping our own timeout first.
     if op == "wait":
         timeout = min(float(args.get("timeout_ms") or 30000) / 1000.0, 600.0) + 5.0
-    elif op == "join":
+    elif op in ("join", "remove"):
         timeout = 30.0            # key derivation is deliberately slow
     else:
         timeout = 5.0
@@ -450,6 +480,14 @@ def render(name: str, result: dict[str, Any], verbose: bool = False) -> str:
     if name == "link_grant":
         who = clean_label(result.get("name"), 40) or result.get("device")
         return f"{who} is in." if result.get("granted") else f"Told {who} no."
+
+    if name == "link_role":
+        return f"{result.get('device')} is now {result.get('role')}."
+
+    if name == "link_remove":
+        head = f"Removed {result.get('removed')}."
+        note = result.get("note")
+        return f"{head} {note}" if note else head
 
     if name == "link_send":
         if result.get("delivered"):

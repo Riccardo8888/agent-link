@@ -26,6 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from link import cli                                            # noqa: E402
+from link import store                                          # noqa: E402
 from link import util                                           # noqa: E402
 
 A_MESSAGE = {
@@ -35,6 +36,37 @@ A_MESSAGE = {
     "text": "installer done, 152 green",
     "received_at": "2026-07-26T11:22:56.174684Z",
 }
+
+
+class TestAllowPublicCarrier(unittest.TestCase):
+    """A public carrier repo is an informed choice, not a scolding."""
+
+    def test_the_key_exists_off_by_default_and_validates(self):
+        prior = os.environ.get("CLAUDE_LINK_HOME")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.environ["CLAUDE_LINK_HOME"] = tmp.name
+        try:
+            cfg = store.load_config()
+            self.assertIs(cfg["allow_public_carrier"], False)
+            self.assertTrue(store.config_value_ok("allow_public_carrier", True))
+            self.assertFalse(store.config_value_ok("allow_public_carrier", "yes"))
+        finally:
+            if prior is None:
+                os.environ.pop("CLAUDE_LINK_HOME", None)
+            else:
+                os.environ["CLAUDE_LINK_HOME"] = prior
+
+    def test_doctor_accepts_a_public_repo_when_chosen(self):
+        ok, lines = cli.visibility_verdict(
+            "PUBLIC", {"allow_public_carrier": True})
+        self.assertTrue(ok)
+        self.assertIn("by choice", "\n".join(lines))
+
+    def test_doctor_still_fails_a_public_repo_by_default(self):
+        ok, lines = cli.visibility_verdict("PUBLIC", {})
+        self.assertFalse(ok)
+        self.assertIn("Make it private", "\n".join(lines))
 
 
 class TestWakeExitCode(unittest.TestCase):

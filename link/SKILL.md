@@ -145,6 +145,31 @@ with the code they paste; a new room means retrying with
 `create_anyway=true`, and the question is then never asked again for that
 room.
 
+## Admins, and removing someone
+
+Rooms created on v2.3+ have admins; the creator starts as one. Admins can
+change roles and remove members. Rooms from before v2.3 have neither — the
+commands say so, and recreating the room is the upgrade path.
+
+```
+link_role(device="dev_...", role="admin")
+```
+
+Removing is a rekey: the room moves to a successor key the removed device
+cannot read, everyone else follows automatically, and the removed member is
+told who removed them. When the human wants someone removed, confirm once:
+**`Removing <name> rekeys the room and cannot be undone. Do it?`** Then:
+
+```
+link_remove(device="dev_...")
+```
+
+Two things always follow a removal, and the agent says both in one line:
+**`Door codes from before the removal are void — share a fresh one. Also
+revoke their access to the carrier repo; git controls that, not me.`**
+The removed member keeps everything already read: removal protects the
+future, not the past.
+
 ## Being concise
 
 Every line above in bold is a script, not a suggestion: one line, no preamble,

@@ -24,6 +24,16 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("#DOOR-", self.text)
         self.assertIn("link_grant", self.text)
 
+    def test_removal_is_explained(self):
+        for line in (
+            'link_remove',
+            'link_role',
+            'rekeys the room and cannot be undone. Do it?',
+            'Door codes from before the removal are void',
+            'revoke their access to the carrier repo',
+        ):
+            self.assertIn(line, self.text, line)
+
 
 if __name__ == "__main__":
     unittest.main()

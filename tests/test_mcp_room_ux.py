@@ -52,6 +52,19 @@ class RenderTest(unittest.TestCase):
 
 
 class ToolSurfaceTest(unittest.TestCase):
+    def test_role_and_remove_tools_exist(self):
+        from link.mcp_server import _TOOL_OPS
+        names = {t["name"] for t in TOOLS}
+        self.assertIn("link_role", names)
+        self.assertIn("link_remove", names)
+        self.assertEqual(_TOOL_OPS["link_role"], "role")
+        self.assertEqual(_TOOL_OPS["link_remove"], "remove")
+
+    def test_remove_renders_the_note(self):
+        text = render("link_remove", {"ok": True, "removed": "dev_x",
+                                      "note": "Door codes are void."})
+        self.assertIn("Door codes are void.", text)
+
     def test_link_grant_exists_and_join_takes_a_name(self):
         names = {t["name"] for t in TOOLS}
         self.assertIn("link_grant", names)

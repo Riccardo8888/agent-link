@@ -81,6 +81,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # unreachable remote turns a room that was created into a tool call that
     # reads as failed. Raise it if a first clone is genuinely slow.
     "git_start_timeout_s": 20,
+    # The carrier learning the social graph is the documented cost of a
+    # public repo; content stays sealed either way. Setting this records that
+    # the human chose it, and turns doctor's failure into a note.
+    "allow_public_carrier": False,
 
     # A relay is the optional upgrade: sub-second instead of a second or two,
     # at the cost of having something to deploy. Unset means "not used".

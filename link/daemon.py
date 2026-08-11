@@ -25,8 +25,9 @@ from collections import deque
 from typing import Any, Callable
 
 from . import __version__, identity
-from .crypto import CryptoError, derive_room, new_invite, parse_invite
+from .crypto import CryptoError, derive_room, is_device_id, new_invite, parse_invite
 from . import door as doorway
+from . import gov
 from .envelope import (
     K_CHANNEL_CLOSE,
     K_CHANNEL_OPEN,
@@ -39,6 +40,7 @@ from .envelope import (
     is_channel_id,
     make_envelope,
     make_origin,
+    open_and_verify,
 )
 from .text import clean_label, clean_text
 from .room import Room
@@ -714,6 +716,49 @@ class LinkDaemon:
                         f"allow=true) or allow=false",
                         device_id=info["device_id"], name=who),
                     "local")
+            try:
+                await self._scan_gov(room, source, base)
+            except Exception as exc:      # advisory; never kill the scan
+                _log(f"[{room.name}] gov scan failed on {name}: "
+                     f"{type(exc).__name__}: {exc}")
+            if room.room_id not in self.rooms:
+                return    # a removal migrated or ended this room mid-scan
+
+    async def _scan_gov(self, room: Room, source, base: str) -> None:
+        """Publish our genesis if this room owes one, refresh the room's
+        governance state from the carrier's records, and act on a winning
+        removal: the target is told and the room ends; everyone else follows
+        the rekey to the successor."""
+        if room.record.get("gov_creator") and not room.gov_state.order:
+            genesis = gov.build_genesis(self.identity, room.room_id)
+            await source.publish_files(
+                lambda: gov.write_gov_record(base, room.room_id, genesis))
+        recs = await asyncio.to_thread(gov.read_gov_records, base, room.room_id)
+        if recs or room.gov_state.order:
+            room.gov_state = gov.evaluate(recs, room.room_id)
+        rec = room.gov_state.removal
+        if rec is None or room.room_id not in self.rooms:
+            return
+        if rec["target"] == self.identity.device_id:
+            try:
+                notice = gov.open_notice_box(self.identity, rec)
+                text = notice.get("text") or "You were removed from this room."
+            except CryptoError:
+                text = "You were removed from this room."
+            await self._notice(room.room_id, f"{text} ({room.name})")
+            async with self._state_lock:
+                await room.stop()
+                self.rooms.pop(room.room_id, None)
+                await self._persist_soon()
+            return
+        try:
+            opened = gov.open_rekey_box(self.identity, rec)
+        except CryptoError:
+            _log(f"[{room.name}] a removal carries no rekey box for this "
+                 "device; staying put until one does")
+            return
+        await self._migrate_after_removal(room, rec,
+                                          opened["name"], opened["secret"])
 
     async def _on_relay_presence(self, room: Room, device_id: str, online: bool,
                                  roster: list[str]) -> None:
@@ -1121,6 +1166,7 @@ class LinkDaemon:
         name = (req.get("room") or "").strip()
         secret = (req.get("passphrase") or req.get("secret") or "").strip()
         warning = None
+        created = False
 
         # A room is people, so entering one starts with a name. `name=` both
         # satisfies the gate and saves the answer, so the agent can ask the
@@ -1160,6 +1206,7 @@ class LinkDaemon:
                 if gate is not None:
                     return gate
                 name, secret = parse_invite(new_invite(name))
+                created = True
             else:
                 return {"ok": False, "error": "pass room= to create one, or invite= to join one"}
         except CryptoError as exc:
@@ -1188,6 +1235,11 @@ class LinkDaemon:
                 "seq_reserved_to": int((existing or {}).get("seq_reserved_to") or 0),
                 "seen": list((existing or {}).get("seen") or []),
             }
+            # Creating the room makes this device its governance genesis
+            # author -- and only creating it. A joiner publishing a second
+            # genesis would race the real one for the lower hash.
+            if created or (existing or {}).get("gov_creator"):
+                record["gov_creator"] = True
             if req.get("relay_url"):
                 record["relay_url"] = req["relay_url"]
             if req.get("shared_dir"):
@@ -1649,6 +1701,188 @@ class LinkDaemon:
         return {"ok": True, "room": room.name, "device": ref,
                 "name": info.get("name"),
                 "granted" if allow else "denied": True}
+
+    def _gov_guard(self, room: Room) -> str | None:
+        """None when this room supports governance and we are an admin;
+        otherwise the refusal text."""
+        if not room.gov_state.order:
+            return ("This room predates roles. Recreate it (link_join) to "
+                    "get removal.")
+        if self.identity.device_id not in room.gov_state.admins:
+            return "Only an admin can do that in this room."
+        return None
+
+    def _resolve_member(self, room: Room, ref: Any) -> str | None:
+        """A device id passes through -- the target of a role or a removal
+        need not have spoken yet. A display name resolves against the roster
+        when exactly one member carries it."""
+        ref = str(ref or "").strip()
+        if is_device_id(ref):
+            return ref
+        named = [d for d, m in room.members.items()
+                 if (m.name or "").lower() == ref.lower()]
+        if len(named) == 1:
+            return named[0]
+        return None
+
+    async def _op_role(self, req) -> dict[str, Any]:
+        """Make a member admin, or member again. Admins only; rooms with a
+        governance chain only."""
+        room, _channel, err = self._resolve_room(req.get("room"))
+        if err:
+            return {"ok": False, "error": err}
+        refusal = self._gov_guard(room)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        role = req.get("role")
+        if role not in gov.ROLES:
+            return {"ok": False, "error": f"role must be one of {list(gov.ROLES)}"}
+        target = self._resolve_member(room, req.get("device"))
+        if target is None:
+            return {"ok": False,
+                    "error": f"no member matches {req.get('device')!r}"}
+        rec = gov.build_role(self.identity, room.room_id,
+                             prev=room.gov_state.head, target=target, role=role)
+        source = room.transport("git") or room.transport("file")
+        if source is None:
+            return {"ok": False, "error": "this room has no carrier to write on"}
+        base = source.shared_dir
+        await source.publish_files(
+            lambda: gov.write_gov_record(base, room.room_id, rec))
+        room.gov_state = gov.evaluate(
+            await asyncio.to_thread(gov.read_gov_records, base, room.room_id),
+            room.room_id)
+        who = req.get("device")
+        await self._deliver_envelope(
+            room.local_event(K_KNOCK, f"{who} is now {role}."), "local")
+        return {"ok": True, "device": target, "role": role}
+
+    async def _op_remove(self, req) -> dict[str, Any]:
+        """Remove a member: rekey the room to a successor sealed to everyone
+        but them, tell them, and migrate. Admins only."""
+        room, _channel, err = self._resolve_room(req.get("room"))
+        if err:
+            return {"ok": False, "error": err}
+        refusal = self._gov_guard(room)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        target = self._resolve_member(room, req.get("device"))
+        if target is None:
+            return {"ok": False,
+                    "error": f"no member matches {req.get('device')!r}"}
+        if target == self.identity.device_id:
+            return {"ok": False, "error": "removing yourself is `link_leave`"}
+        source = room.transport("git") or room.transport("file")
+        if source is None:
+            return {"ok": False, "error": "this room has no carrier to write on"}
+        base = source.shared_dir
+
+        entries = await asyncio.to_thread(
+            doorway.read_door_entries, base, room.room_id)
+        box_keys: dict[str, str] = {}
+        for entry in entries:
+            try:
+                box_keys[entry["device_id"]] = doorway.verify_door_entry(
+                    entry, room.room_id)
+            except CryptoError:
+                continue
+        known = set(room.members) | {self.identity.device_id}
+        missing = sorted(known - set(box_keys) - {target})
+        if missing:
+            return {"ok": False, "error":
+                    f"no door key on the carrier for {', '.join(missing)}; "
+                    "they must sync once before a removal can include them"}
+
+        succ_name, succ_secret = parse_invite(new_invite(room.name))
+        rec = gov.build_removal(
+            self.identity, room.room_id, prev=room.gov_state.head,
+            target=target,
+            successor_name=succ_name, successor_secret=succ_secret,
+            admins=sorted(room.gov_state.admins),
+            box_keys=box_keys,
+            removed_by_name=self.cfg.get("display_name") or self.identity.label)
+        await source.publish_files(
+            lambda: gov.write_gov_record(base, room.room_id, rec))
+        removed_label = req.get("device")
+        new_room = await self._migrate_after_removal(
+            room, rec, succ_name, succ_secret)
+        return {"ok": True, "removed": target,
+                "successor_room_id": new_room.room_id if new_room else None,
+                "note": ("Door codes shared before this are void; share a new "
+                         "one with `agent-link invite --door`. Also revoke "
+                         f"{removed_label}'s push access to the carrier repo "
+                         "-- git controls that, not the protocol.")}
+
+    async def _migrate_after_removal(self, room: Room, rec: dict[str, Any],
+                                     succ_name: str,
+                                     succ_secret: str) -> Room | None:
+        """Stop the predecessor, start the successor, carry the carrier
+        config. The predecessor's transcript stays in .conv/. Used by the
+        remover right away and by every survivor when their scan sees the
+        removal."""
+        old_record = room.record
+        old_keys = room.keys
+        queued = list(room.outbox)
+        await self._notice(room.room_id,
+                           f"{rec['device_id']} removed {rec['target']} from "
+                           f"{room.name}. Door codes are void; reshare with "
+                           "`agent-link invite --door`.")
+        async with self._state_lock:
+            await room.stop()
+            self.rooms.pop(room.room_id, None)
+            record = {"name": succ_name, "secret": succ_secret,
+                      "joined_at": now_iso(), "seq_reserved_to": 0, "seen": [],
+                      "gov_predecessor": room.room_id}
+            if rec["device_id"] == self.identity.device_id:
+                # The remover seeds the successor's chain; nobody else may.
+                record["gov_creator"] = True
+            for key in ("git_remote", "git_branch", "shared_dir", "relay_url"):
+                if old_record.get(key):
+                    record[key] = old_record[key]
+            try:
+                new_room = await self._start_room(record)
+            except (CryptoError, ValueError) as exc:
+                _log(f"[{room.name}] could not start the successor room: {exc}")
+                await self._persist_soon()
+                return None
+            await self._persist_soon()
+
+        # Until the carrier syncs the successor's chain, authority is what the
+        # removal record embeds -- that is why it embeds it.
+        new_room.gov_state = gov.GovState(
+            admins=set(rec["successor"]["admins"]))
+
+        source = new_room.transport("git") or new_room.transport("file")
+        if source is not None and rec["device_id"] == self.identity.device_id:
+            base = source.shared_dir
+
+            def seed():
+                genesis = gov.build_genesis(self.identity, new_room.room_id)
+                gov.write_gov_record(base, new_room.room_id, genesis)
+                prev = gov.record_hash(genesis)
+                for dev in rec["successor"]["admins"]:
+                    if dev == self.identity.device_id:
+                        continue
+                    r = gov.build_role(self.identity, new_room.room_id,
+                                       prev, dev, "admin")
+                    gov.write_gov_record(base, new_room.room_id, r)
+                    prev = gov.record_hash(r)
+            await source.publish_files(seed)
+            recs = await asyncio.to_thread(
+                gov.read_gov_records, base, new_room.room_id)
+            new_room.gov_state = gov.evaluate(recs, new_room.room_id)
+
+        # Whatever sat queued for the predecessor re-targets the successor.
+        for frame in queued:
+            try:
+                env = open_and_verify(old_keys, frame)
+            except CryptoError:
+                continue
+            if env.get("kind") != K_MSG:
+                continue
+            await new_room.send(new_room.build(
+                K_MSG, env.get("body"), to=env.get("to", "*")))
+        return new_room
 
     async def _op_knocks(self, req) -> dict[str, Any]:
         out = []

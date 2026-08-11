@@ -23,7 +23,7 @@ import time
 from collections import OrderedDict, deque
 from typing import Any, Awaitable, Callable
 
-from . import crypto
+from . import crypto, gov
 from .text import clean_label
 from .envelope import (
     K_HELLO,
@@ -126,6 +126,10 @@ class Room:
         # the dict `door.read_knock` returned. Fed by the daemon's scan;
         # cleared by a grant or a denial.
         self.pending_knocks: dict[str, dict[str, Any]] = {}
+        # Governance: admins and removals, evaluated from the carrier's gov
+        # records by the daemon's scan. Empty means a room from before roles
+        # existed, and the role/remove ops say so.
+        self.gov_state = gov.GovState()
         self.outbox: deque[dict[str, Any]] = deque(maxlen=500)
         self._seen: OrderedDict[str, float] = OrderedDict()
         self._transports: dict[str, Any] = {}
@@ -537,6 +541,8 @@ class Room:
                 for d, k in self.pending_knocks.items()
             ] or None,
         }
+        if self.gov_state.order:
+            status["admins"] = sorted(self.gov_state.admins)
         if verbose:
             status.update({
                 # Deliberately not the invite. It is the room's long-lived

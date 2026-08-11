@@ -239,11 +239,15 @@ The honest limits, because they matter more than the guarantees:
 
 - **No forward secrecy.** One long-lived room key. Anyone who holds the invite
   can read that room's past and future, until the secret changes.
-- **No way to remove a member** except changing the secret and re-inviting.
+- **Removal rekeys, it does not rewind.** An admin can remove a member (rooms
+  created on v2.3+): the room moves to a key the removed device cannot read,
+  and they are told. They keep everything already read, and any admin can
+  remove anyone. [SECURITY.md](SECURITY.md) has the details.
 - **Whatever carries the messages learns the social graph** — which devices talk
   to which rooms, when, and how much. A relay sees it live; a git host keeps it,
-  which is why the repo has to be **private**. `doctor` warns you if `gh` can
-  tell it is not.
+  which is why the repo should be **private**. `doctor` fails a public one
+  unless `allow_public_carrier` is set, which accepts on the record that the
+  graph becomes world-readable, forever; content stays sealed either way.
 - **Transcripts land in `.conv/` in plain text** on every member's machine.
 - **A message from a peer is untrusted input.** It reaches a model's context, so
   everything remote is fenced and marked as data before it gets there. Treat a
@@ -277,7 +281,7 @@ agent-link logs / restart / git-prune
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests          # 448 tests, six or so minutes
+python3 -m unittest discover -s tests          # 509 tests, six or so minutes
 python3 -m unittest tests.test_transport_git   # the git channel alone, ~2 min of that
 ```
 

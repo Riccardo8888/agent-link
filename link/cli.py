@@ -199,6 +199,27 @@ def cmd_grant(args) -> int:
     return 0
 
 
+def cmd_role(args) -> int:
+    client.ensure_daemon()
+    resp = client.call("role", device=args.who, role=args.role, room=args.room)
+    if not resp.get("ok"):
+        print(f"error: {resp.get('error')}", file=sys.stderr)
+        return 1
+    print(f"{args.who} is now {resp['role']}.")
+    return 0
+
+
+def cmd_remove(args) -> int:
+    client.ensure_daemon()
+    resp = client.call("remove", device=args.who, room=args.room, timeout=30.0)
+    if not resp.get("ok"):
+        print(f"error: {resp.get('error')}", file=sys.stderr)
+        return 1
+    note = resp.get("note") or ""
+    print(f"Removed {args.who}. {note}".strip())
+    return 0
+
+
 def cmd_leave(args) -> int:
     client.ensure_daemon()
     _dump(client.call("leave", room=args.room))
@@ -679,6 +700,28 @@ def cmd_doctor(args) -> int:
     return 0 if ok else 1
 
 
+def visibility_verdict(visibility: str | None,
+                       cfg: dict) -> tuple[bool, list[str]]:
+    """What doctor says about a PUBLIC carrier repo, and whether it passes.
+    Pure so the test can hold it still. A public repo is a documented cost
+    (the social graph, world-readable, forever) that `allow_public_carrier`
+    accepts on the record; without that, it is a failure with the fix named."""
+    if visibility != "PUBLIC":
+        return True, []
+    if cfg.get("allow_public_carrier"):
+        return True, [
+            "visibility: PUBLIC, by choice (allow_public_carrier).",
+            "Content stays sealed; who talks to whom, and when, is on the",
+            "internet permanently.",
+        ]
+    return False, [
+        "WARNING: this repo is PUBLIC. Messages stay unreadable,",
+        "but every device id, who talks to whom and when is on",
+        "the internet permanently. Make it private, or set",
+        "allow_public_carrier=true to accept that on the record.",
+    ]
+
+
 def _doctor_git(cfg: dict) -> bool:
     """Report on the git channel. False only for a fault the user has to fix.
 
@@ -735,11 +778,12 @@ def _doctor_git(cfg: dict) -> bool:
     print(f"              clone: {cfg.get('git_dir') or clone_dir(_root(), remote, branch)}")
     visibility = github_visibility(remote)
     if visibility == "PUBLIC":
-        print("              WARNING: this repo is PUBLIC. Messages stay unreadable,")
-        print("              but every device id, who talks to whom and when is on")
-        print("              the internet permanently. Make it private.")
-        return False
-    if visibility:
+        ok, lines = visibility_verdict(visibility, cfg)
+        for line in lines:
+            print(f"              {line}")
+        if not ok:
+            return False
+    elif visibility:
         print(f"              visibility: {visibility.lower()}")
     else:
         # Said out loud, because silence here read as a pass. `github_visibility`
@@ -912,6 +956,18 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("who", help="device id, or name if unambiguous")
     sd.add_argument("--room", default=None)
     sd.set_defaults(func=cmd_grant, deny=True)
+
+    sr = sub.add_parser("role", help="make a member admin, or member again")
+    sr.add_argument("who", help="device id, or name if unambiguous")
+    sr.add_argument("role", choices=["admin", "member"])
+    sr.add_argument("--room", default=None)
+    sr.set_defaults(func=cmd_role)
+
+    sx = sub.add_parser("remove",
+                        help="remove a member: rekey the room without them")
+    sx.add_argument("who", help="device id, or name if unambiguous")
+    sx.add_argument("--room", default=None)
+    sx.set_defaults(func=cmd_remove)
 
     sv = sub.add_parser("leave")
     sv.add_argument("room")

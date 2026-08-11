@@ -26,7 +26,11 @@ RELAY_SKIP_REASON = "the relay server is not in this tree; it ships separately"
 from link.util import free_port  # noqa: E402
 from tests.timing import budget  # noqa: E402
 
-TOOLS_LIST_BUDGET = 6 * 1024      # schemas sit in context for the whole session
+# Schemas sit in context for the whole session. Raised from 6 KiB when
+# link_role and link_remove landed (v2.3.0): two real tools, ~500 bytes,
+# with descriptions already trimmed to the bone. Do not raise this for
+# wording; raise it for tools.
+TOOLS_LIST_BUDGET = 7 * 1024
 INBOX_RENDER_BUDGET = 1024        # one long message must not flood a turn
 
 
@@ -158,7 +162,8 @@ class TestMCPServer(unittest.TestCase):
     def test_tools_list_is_complete_and_well_formed(self):
         tools = self.s.request("tools/list")["result"]["tools"]
         self.assertEqual({t["name"] for t in tools}, {
-            "link_status", "link_join", "link_grant", "link_send", "link_inbox",
+            "link_status", "link_join", "link_grant", "link_role",
+            "link_remove", "link_send", "link_inbox",
             "link_read", "link_wait", "link_channel", "link_history",
             "link_leave",
         })

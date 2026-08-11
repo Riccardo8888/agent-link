@@ -4,7 +4,7 @@ One dependency on the agent side (`cryptography`); the relay has none beyond
 the standard library.
 """
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 # Governs the peer wire: the sealed envelope both ends must agree on. The
 # control socket between the MCP server and the daemon is versioned separately
