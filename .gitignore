@@ -1,0 +1,43 @@
+# Transcripts stay local to each machine — never commit them.
+.conv/
+
+# Local runtime state, if CLAUDE_LINK_HOME points inside the repo.
+config.json
+state.json
+state.json.v1
+daemon.json
+logs/
+
+# This device's Ed25519 signing key. Never commit it — anyone holding it can
+# speak as this device in every room it belongs to.
+identity.json
+
+# The relay's mailbox, when it is run locally rather than in its container.
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/
+
+__pycache__/
+*.py[cod]
+.venv/
+
+# The git transport's local clone. It holds the channel's sealed frames and a
+# .git/config carrying the remote URL -- which is where a PAT lives when someone
+# authenticates that way.
+git/
+claude-link*/
+
+# atomic_write_text stages beside its target, so a process killed mid-write
+# leaves a partial identity.json or state.json under one of these names.
+.tmp-*
+*.part
+
+# Editable-install metadata, written into the source tree by `pip install -e .`.
+*.egg-info/
+build/
+dist/
+
+# pip and pipx leave a cache here when the installer is exercised from the
+# repository root, which `git add -A` will otherwise sweep into a commit.
+pip/

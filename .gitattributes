@@ -1,0 +1,7 @@
+# Normalise everything to LF in the repository and on checkout. Without this,
+# a clone on Windows (core.autocrlf=true) rewrites install.sh with CRLF, and
+# Linux then fails it with "bad interpreter: /usr/bin/env bash^M".
+* text=auto eol=lf
+
+# PowerShell is the exception: keep CRLF so it stays native on Windows.
+*.ps1 text eol=crlf

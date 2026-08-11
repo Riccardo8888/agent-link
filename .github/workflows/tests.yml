@@ -1,0 +1,151 @@
+name: tests
+
+# The suite starts real daemons in subprocesses and talks to them over
+# loopback. Nothing here reaches the network, so these jobs need no
+# secrets and no services.
+
+on:
+  push:
+    # Every branch except the channel's. README and SKILL.md both tell people to
+    # put `branches-ignore: [claude-link]` on any repo they point this at, and
+    # this repository is a repository somebody can point it at -- the more so
+    # once it is public. A heartbeat is a push, so without this line a single
+    # member using it as their channel would start about 1900 runs a day here.
+    branches-ignore: ["claude-link"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes anything back. The default token is read-only so a
+# compromised action in one of these jobs cannot push to the repository.
+permissions:
+  contents: read
+
+jobs:
+  # The point of the matrix is the two platforms nobody develops this on.
+  # Windows in particular has caught real bugs: SIGKILL does not exist there,
+  # and the installer resolves its own paths differently.
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: "3.10"}
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.12"}
+          - {os: ubuntu-latest, python: "3.13"}
+          # The dev machine runs 3.14. Untested is not the same as unguarded,
+          # and this is the line that closes the gap.
+          - {os: ubuntu-latest, python: "3.14"}
+          - {os: macos-latest, python: "3.12"}
+          - {os: windows-latest, python: "3.12"}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install the one dependency
+        run: python -m pip install --upgrade pip "cryptography>=42"
+
+      - name: Everything imports
+        run: python -m compileall -q link tests
+
+      - name: Run the suite
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: python -X utf8 -W ignore::ResourceWarning -m unittest discover -s tests -v
+
+  # What the installer writes is asserted in tests/test_install.py, on every
+  # platform, in a tenth of a second. What a unit test cannot reach is the part
+  # around it: finding an interpreter, the editable pip install, and the
+  # wrapper handing over. So this job runs the real thing, end to end, into a
+  # throwaway home -- twice, because re-running must not stack anything.
+  installers:
+    name: installer runs on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The wrappers parse
+        if: runner.os != 'Windows'
+        run: |
+          bash -n install.sh
+          bash -n install-codex.sh
+
+      - name: Run it, twice, into a throwaway home
+        if: runner.os != 'Windows'
+        run: |
+          export HOME="$(mktemp -d)"
+          ./install.sh --agent both --self-test smoke --no-diagnostics
+          ./install.sh --agent both --self-test none  --no-diagnostics
+          test -f "$HOME/.claude.json"
+          test -f "$HOME/.codex/config.toml"
+          test -f "$HOME/.claude/skills/claude-link/SKILL.md"
+          test -f "$HOME/.codex/skills/claude-link/SKILL.md"
+
+          # Nothing may point back at this checkout. That is the difference
+          # between a skill and a directory somebody has to keep forever, and
+          # the only way to prove it is to look at what was actually written.
+          ! grep -q "$PWD" "$HOME/.claude.json"
+          ! grep -q "$PWD" "$HOME/.codex/config.toml"
+          grep -q "link.mcp_server" "$HOME/.claude.json"
+          grep -q "link.hook_notify" "$HOME/.claude/settings.json"
+
+          # A --user install puts the console script under the (throwaway) home,
+          # which is not on PATH here. Ask Python where that is rather than
+          # assuming: macOS uses ~/Library/Python/X.Y/bin and Linux ~/.local/bin,
+          # and hardcoding the Linux one is what made this job fail on macOS
+          # while the installer itself was printing the right path all along.
+          export PATH="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))'):$PATH"
+          # From outside the checkout, so nothing resolves through the current
+          # directory. That is the claim: the install stands on its own.
+          cd "$(mktemp -d)"
+          claude-link --help >/dev/null
+          python -c "import link.mcp_server, link.hook_notify"
+          echo "installed, idempotent, self-contained, and runs from elsewhere"
+
+      - name: Run it, twice, into a throwaway home (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fake = Join-Path $env:RUNNER_TEMP 'fakehome'
+          New-Item -ItemType Directory -Force -Path $fake | Out-Null
+          $env:USERPROFILE = $fake
+          $env:HOME = $fake
+          ./install.ps1 -Agent both -SelfTest smoke -NoDiagnostics
+          if ($LASTEXITCODE -ne 0) { throw "installer exited $LASTEXITCODE" }
+          ./install.ps1 -Agent both -SelfTest none -NoDiagnostics
+          if ($LASTEXITCODE -ne 0) { throw "re-running the installer exited $LASTEXITCODE" }
+          foreach ($p in @('.claude.json', '.codex\config.toml',
+                           '.claude\skills\claude-link\SKILL.md')) {
+            if (-not (Test-Path (Join-Path $fake $p))) { throw "missing: $p" }
+          }
+          # Nothing may point back at this checkout, on Windows either.
+          $claude = Get-Content (Join-Path $fake '.claude.json') -Raw
+          if ($claude -match [regex]::Escape($PWD.Path)) {
+            throw "the MCP entry names this checkout; it is meant to be a module"
+          }
+          if ($claude -notmatch 'link\.mcp_server') { throw "not registered as a module" }
+          Push-Location $env:RUNNER_TEMP
+          try { & python -c "import link.mcp_server, link.hook_notify" }
+          finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw "the package does not import from elsewhere" }
+          Write-Host "install.ps1 installed, idempotent, and self-contained"

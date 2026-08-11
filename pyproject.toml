@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Renamed from `claude-link`, which is taken on PyPI by an unrelated live
+# package: `pip install claude-link` fetched the wrong thing and its console
+# script landed on the same name. Both problems end here.
+name = "agent-link"
+description = "An end-to-end encrypted channel between coding agents, anywhere"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+
+# One dependency, and it is load-bearing: every frame is AES-GCM sealed and
+# Ed25519 signed, so an install that cannot import cryptography is not a
+# degraded link, it is a broken one. tomli only exists to let Python 3.10 read
+# back the Codex config the installer writes, instead of writing it unverified.
+dependencies = [
+    "cryptography>=42",
+    "tomli>=2.0 ; python_version < '3.11'",
+]
+
+[project.scripts]
+# The reason this exists: without it every instruction has to say
+# "python3 -m link.cli", which only works from a clone of this repository.
+# `agent-link doctor` works from any directory, which is where people are.
+agent-link = "link.cli:main"
+
+[tool.setuptools]
+# relay/ ships as a container, not as part of the client install.
+packages = ["link"]
+
+[tool.setuptools.package-data]
+# SKILL.md is the product, not documentation about it: the installer copies it
+# into ~/.claude/skills/. It lives inside the package so that an install from a
+# URL carries it, which is what lets there be no clone to keep.
+link = ["SKILL.md"]
+
+[tool.setuptools.dynamic]
+version = { attr = "link.__version__" }
