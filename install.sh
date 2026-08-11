@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install claude-link (Linux / macOS).
+# Install agent-link (Linux / macOS).
 #
 # This script does one thing: find a Python 3.10+ interpreter and hand over to
 # link/install.py, which is where the actual installation lives -- one

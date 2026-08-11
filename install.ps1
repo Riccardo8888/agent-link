@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Install claude-link (Windows).
+    Install agent-link (Windows).
 
 .DESCRIPTION
     This script does one thing: find a Python 3.10+ interpreter and hand over to

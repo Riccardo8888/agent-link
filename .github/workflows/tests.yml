@@ -98,8 +98,8 @@ jobs:
           ./install.sh --agent both --self-test none  --no-diagnostics
           test -f "$HOME/.claude.json"
           test -f "$HOME/.codex/config.toml"
-          test -f "$HOME/.claude/skills/claude-link/SKILL.md"
-          test -f "$HOME/.codex/skills/claude-link/SKILL.md"
+          test -f "$HOME/.claude/skills/agent-link/SKILL.md"
+          test -f "$HOME/.codex/skills/agent-link/SKILL.md"
 
           # Nothing may point back at this checkout. That is the difference
           # between a skill and a directory somebody has to keep forever, and
@@ -118,7 +118,7 @@ jobs:
           # From outside the checkout, so nothing resolves through the current
           # directory. That is the claim: the install stands on its own.
           cd "$(mktemp -d)"
-          claude-link --help >/dev/null
+          agent-link --help >/dev/null
           python -c "import link.mcp_server, link.hook_notify"
           echo "installed, idempotent, self-contained, and runs from elsewhere"
 
@@ -135,7 +135,7 @@ jobs:
           ./install.ps1 -Agent both -SelfTest none -NoDiagnostics
           if ($LASTEXITCODE -ne 0) { throw "re-running the installer exited $LASTEXITCODE" }
           foreach ($p in @('.claude.json', '.codex\config.toml',
-                           '.claude\skills\claude-link\SKILL.md')) {
+                           '.claude\skills\agent-link\SKILL.md')) {
             if (-not (Test-Path (Join-Path $fake $p))) { throw "missing: $p" }
           }
           # Nothing may point back at this checkout, on Windows either.
