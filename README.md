@@ -317,3 +317,6 @@ link/
 SECURITY.md          how to report a break in private, and what is by design
 install.sh, install.ps1
 ```
+## Contributors
+Riccardo Bertamini riccardo.bertamini@studbocconi.it
+Niccolò Maria Pagano niccolò.pagano@studbocconi.it
