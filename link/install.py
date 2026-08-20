@@ -254,6 +254,44 @@ def edit_json(path: str, mutate: Callable[[dict], None], out: Out) -> bool:
     return True
 
 
+def seed_home_ctrl_port(home: str, port: int, out: Out) -> None:
+    """Write a link home's own control port into its config.json.
+
+    Each harness gets its own CLAUDE_LINK_HOME and its own control port, and the
+    MCP registration carries that port as an env var. The CLI does not read that
+    env: it goes through `load_config`, which reads the home's config.json, and
+    every home starts on the same shipped default. So without this,
+    `CLAUDE_LINK_HOME=<the codex home> agent-link ...` tries to bind the daemon
+    port that Claude Code's home already owns, and dies with "daemon failed to
+    start within 12.0s: no response".
+
+    The decision is made before anything is written, so an install that would
+    change nothing touches nothing -- no rewrite, no backup churn. A port the
+    user set to something of their own is left alone; only a missing value or
+    the shipped default is filled in.
+    """
+    cfg_path = os.path.join(home, "config.json")
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as fh:
+                current = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            # Unreadable or unparseable: edit_json refuses it and says so, which
+            # is what the user needs to hear -- that home cannot start either way.
+            current = None
+        if isinstance(current, dict):
+            have = current.get("ctrl_port")
+            if have == port:
+                return
+            if have not in (None, CLAUDE_CTRL_PORT):
+                return
+
+    def _set(cfg: dict) -> None:
+        cfg["ctrl_port"] = port
+
+    edit_json(cfg_path, _set, out)
+
+
 # --------------------------------------------------------------------------- #
 # 1. interpreter
 # --------------------------------------------------------------------------- #
@@ -1262,8 +1300,12 @@ def main(argv: list[str] | None = None) -> int:
         out.warn(f"registered by path into {LINK_ROOT}. Do not move or delete it.")
 
     if "claude" in agents:
+        # The MCP env carries this home's control port, but the CLI reads
+        # config.json. Seed it so both agree.
+        seed_home_ctrl_port(CLAUDE_LINK_HOME, CLAUDE_CTRL_PORT, out)
         install_claude(python, args.skip_hook, out, as_module)
     if "codex" in agents:
+        seed_home_ctrl_port(CODEX_LINK_HOME, int(CODEX_CTRL_PORT), out)
         install_codex(python, args.skip_hook, out, as_module)
 
     healthy = True

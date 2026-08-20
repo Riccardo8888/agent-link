@@ -19,6 +19,7 @@ enforced.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import OrderedDict, deque
 from typing import Any, Awaitable, Callable
@@ -201,6 +202,22 @@ class Room:
         return live
 
     async def stop(self) -> None:
+        # A pending git-channel retry must not outlive the room: on shutdown it
+        # would otherwise sit out its whole backoff, and after `leave` it would
+        # rebuild a transport for a room that is gone.
+        task = getattr(self, "_git_retry_task", None)
+        self._git_retry_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                # CancelledError is not an Exception, so it has to be named:
+                # awaiting a task we just cancelled is expected to raise it.
+                # Teardown then runs to completion either way -- a room left
+                # half-stopped is worse than a teardown that ignores a late
+                # cancel.
+                pass
         for transport in self._transports.values():
             try:
                 await transport.stop()

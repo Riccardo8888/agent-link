@@ -64,6 +64,13 @@ from .util import (append_line, cli_invocation, new_id, now_iso,
                    primary_ip, truncate)
 
 PREVIEW_CHARS = 400          # what an inbox entry shows before link_read
+# A git channel that fails to start is retried on this ladder rather than
+# left dead until the daemon is restarted. Slow enough that an outage does
+# not become a request flood, capped so a long outage still recovers on
+# its own within a few minutes of the remote coming back.
+GIT_RETRY_BASE_S = 15.0
+GIT_RETRY_MAX_S = 300.0      # ceiling; keeps trying at this cadence
+GIT_RETRY_FACTOR = 2.0
 STATUS_READY_TIMEOUT_S = 2.0  # below the control client's ordinary 3 s deadline
 # How long one `.conv/` write may take before it is abandoned. A sink can be
 # any directory the user named, a disconnected share included.
@@ -540,6 +547,17 @@ class LinkDaemon:
         budget = float(self.cfg.get("git_start_timeout_s", 20))
         try:
             await asyncio.wait_for(transport.start(), timeout=budget)
+        except asyncio.CancelledError:
+            # The retry loop below can be cancelled (daemon shutdown, `leave`)
+            # while a start is in flight. The transport has not been attached
+            # yet, so the room's own teardown cannot see it, and its poll task
+            # would outlive the room it was built for. No flush: whatever we are
+            # shutting down for, a final network round is not going to help.
+            try:
+                await transport.stop(flush=False)
+            except Exception:
+                pass
+            raise
         except (GitError, OSError, asyncio.TimeoutError) as exc:
             if isinstance(exc, asyncio.TimeoutError):
                 exc = TimeoutError(
@@ -561,10 +579,61 @@ class LinkDaemon:
             room.setup_error = "; ".join(
                 p for p in (room.setup_error, f"git channel unusable: {clean_text(str(exc), 200)}") if p
             )
+            # Transient by nature -- a DNS hiccup, a slow first clone, a remote
+            # briefly refusing. Keep trying rather than leaving the room without
+            # its transport until somebody notices and restarts the daemon.
+            self._schedule_git_retry(room, record, keys)
             return
+        room._git_retry_attempt = 0
         room.attach("git", transport)
         _log(f"[{room.name}] git channel active on {branch} of "
              f"{redact_remote(remote)}")
+
+    def _schedule_git_retry(self, room: Room, record: dict[str, Any], keys) -> None:
+        """Re-attempt a git channel that failed to start, with backoff.
+
+        One retry loop per room. It stops only when the channel comes up, the
+        room is stopped, or the daemon is shutting down; a remote that is
+        unreachable for an hour is retried until it is not. Without this, a
+        single transient failure left the room reading transport=offline, with
+        nothing surfaced after the first error, until somebody restarted the
+        daemon.
+        """
+        existing = getattr(room, "_git_retry_task", None)
+        # One retry loop per room -- but the loop is allowed to re-arm itself,
+        # so compare against the running task rather than clearing the handle.
+        # Keeping a live handle at all times is what lets Room.stop() cancel it.
+        #
+        # This rests on _attach_git never turning a cancellation into an
+        # ordinary exception: if it did, a cancelled attempt would re-arm from
+        # its own except branch and outlive the Room.stop() that cancelled it.
+        # The catch tuple there deliberately excludes CancelledError.
+        if (existing is not None and not existing.done()
+                and existing is not asyncio.current_task()):
+            return
+        attempt = getattr(room, "_git_retry_attempt", 0) + 1
+        room._git_retry_attempt = attempt
+        delay = min(GIT_RETRY_MAX_S,
+                    GIT_RETRY_BASE_S * (GIT_RETRY_FACTOR ** (attempt - 1)))
+
+        async def _retry() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if self._stopping.is_set():
+                    return
+                if room.transport("git") is not None:
+                    room._git_retry_attempt = 0
+                    return
+                _log(f"[{room.name}] retrying git channel "
+                     f"(attempt {attempt}, after {delay:.0f}s)")
+                await self._attach_git(room, record, keys)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:            # a retry must never kill the daemon
+                _log(f"[{room.name}] git retry raised: {clean_text(str(exc), 200)}")
+                self._schedule_git_retry(room, record, keys)
+
+        room._git_retry_task = asyncio.create_task(_retry())
 
     def _direct_endpoint(self) -> dict[str, Any] | None:
         """Where members should dial us, or None when direct links are off."""
@@ -612,10 +681,6 @@ class LinkDaemon:
         already on the share at startup, where there is no earlier reading to
         compare against and their word is the only evidence there is.
         """
-        sources = [(name, room.transport(name)) for name in ("file", "git")]
-        sources = [(name, t) for name, t in sources if t is not None]
-        if not sources:
-            return
         known: set[str] = set()
         beats: dict[tuple[str, str], float] = {}
         # Identity, not id. `_start_room` replaces the Room object when a
@@ -623,6 +688,16 @@ class LinkDaemon:
         # forever against a dead Room -- still announcing, still delivering
         # presence notices, one leaked task per re-join.
         while self.rooms.get(room.room_id) is room:
+            # Re-read every pass rather than snapshotting once. A git channel
+            # that fails to start is retried in the background, so a room can
+            # gain its only heartbeat source long after this loop began -- and a
+            # git-only room whose first attach failed starts with none at all.
+            # Reading the transports once meant such a room came back with
+            # working delivery but no presence, no knock scanning and no
+            # governance until somebody restarted the daemon.
+            sources = [(name, transport) for name, transport in
+                       ((n, room.transport(n)) for n in ("file", "git"))
+                       if transport is not None]
             for name, source in sources:
                 try:
                     roster = source.roster()
