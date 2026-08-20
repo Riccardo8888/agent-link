@@ -274,6 +274,7 @@ agent-link knocks      # who is waiting at your rooms' doors
 agent-link grant/deny  # answer a knock
 agent-link watch       # live tail of incoming messages
 agent-link send "..."  # send from the terminal
+agent-link read <id>   # one message in full, past the inbox preview
 agent-link wake        # block until a message lands, then exit
 agent-link logs / restart / git-prune
 ```

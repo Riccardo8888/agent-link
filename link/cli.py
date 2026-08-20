@@ -226,10 +226,54 @@ def cmd_leave(args) -> int:
     return 0
 
 
+def _timeout_arg(text: str) -> float:
+    """Seconds to wait for the daemon: a positive, finite number.
+
+    argparse would otherwise hand `inf` (or `1e400`) straight to
+    socket.settimeout, which raises OverflowError from deep inside the client
+    and escapes as a traceback, and would let `0` through as "give up
+    immediately", which puts the socket in non-blocking mode and reports a
+    confusing errno rather than a wait.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number")
+    if value != value or value in (float("inf"), float("-inf")):
+        raise argparse.ArgumentTypeError("timeout must be a finite number")
+    if value <= 0:
+        raise argparse.ArgumentTypeError("timeout must be greater than zero")
+    return value
+
+
 def cmd_send(args) -> int:
     client.ensure_daemon()
+    # A git-backed send pushes to a remote before the daemon can answer, which
+    # routinely exceeds the 3 s control default: the CLI reported "daemon did
+    # not answer within 3.0s" for sends that had in fact gone out.
     _dump(client.call("send", text=args.text, room=args.room,
-                      role=args.role, agent=args.agent))
+                      role=args.role, agent=args.agent,
+                      timeout=float(getattr(args, "timeout", 30.0) or 30.0)))
+    return 0
+
+
+def cmd_read(args) -> int:
+    """The full text of one message by id -- the CLI half of `link_read`.
+
+    `inbox` truncates each entry at PREVIEW_CHARS. Without this command someone
+    driving agent-link from a shell can see the first 400 characters of a
+    message and has no supported way to read the rest.
+    """
+    client.ensure_daemon()
+    resp = client.call("read", msg_id=args.msg_id, timeout=30.0)
+    if not resp.get("ok"):
+        print(f"error: {resp.get('error')}", file=sys.stderr)
+        return 1
+    message = resp.get("message") or {}
+    if getattr(args, "json", False):
+        _dump(resp)
+    else:
+        print(message.get("text", ""))
     return 0
 
 
@@ -975,6 +1019,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ss = sub.add_parser("send")
     ss.add_argument("text")
+    ss.add_argument("--timeout", type=_timeout_arg, default=30.0,
+                    help="seconds to wait for the daemon (git sends are slow)")
     ss.add_argument("--room")
     ss.add_argument("--role", default="orchestrator", choices=["orchestrator", "subagent"])
     ss.add_argument("--agent", default="cli")
@@ -985,6 +1031,13 @@ def build_parser() -> argparse.ArgumentParser:
     si.add_argument("--limit", type=int, default=50)
     si.add_argument("--peek", action="store_true")
     si.set_defaults(func=cmd_inbox)
+
+    sr = sub.add_parser("read",
+                        help="one message in full, past the inbox preview")
+    sr.add_argument("msg_id")
+    sr.add_argument("--json", action="store_true",
+                    help="emit the whole record rather than just the text")
+    sr.set_defaults(func=cmd_read)
 
     sw = sub.add_parser("watch")
     sw.add_argument("--room")
