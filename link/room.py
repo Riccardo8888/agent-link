@@ -146,7 +146,20 @@ class Room:
         self.dropped_overflow = 0
         # Set when a transport could not be brought up for a reason the user
         # has to fix, e.g. a shared folder that is not where it was said to be.
-        self.setup_error: str | None = None
+        #
+        # Kept per carrier rather than as one string, because the git one is
+        # now written repeatedly. A failed git attach is retried on a backoff
+        # ladder for as long as the remote is down, and joining each failure
+        # onto the last grew this without bound: at the 300 s ceiling an
+        # overnight outage left tens of kilobytes of the same sentence, which
+        # `link_status` prints untruncated straight into a model's context.
+        # Worse, nothing cleared it, so a room whose channel came back kept
+        # reporting itself broken -- the inverse of what the retry is for.
+        #
+        # A dict fixes both without losing the reason the old code joined:
+        # a room can have a broken folder *and* a broken repo, and hiding one
+        # behind the other sends somebody to fix half of it.
+        self._setup_errors: dict[str, str] = {}
 
         # Sequence numbers come from a reserved block. Persisting the ceiling
         # once per thousand messages keeps the send path off the disk entirely,
@@ -172,6 +185,32 @@ class Room:
 
     def invite(self) -> str:
         return f"{self.name}#{self.record.get('secret', '')}"
+
+    # -- why a carrier is not up --------------------------------------------- #
+
+    @property
+    def setup_error(self) -> str | None:
+        """Every carrier's current complaint, joined. None when all are quiet.
+
+        Read by `link_status` and by the join/create reply. Composed on every
+        read rather than accumulated, so a carrier that recovers stops being
+        mentioned the moment it does.
+        """
+        return "; ".join(self._setup_errors[k]
+                         for k in sorted(self._setup_errors)) or None
+
+    def note_setup_error(self, carrier: str, message: str | None) -> None:
+        """Record why `carrier` is not up, or clear it with None.
+
+        Replaces that carrier's clause rather than appending to it: the git
+        one is rewritten on every retry, and appending is what made this grow
+        without bound. Clearing on success is the other half -- a channel that
+        came back must stop reporting itself broken.
+        """
+        if message:
+            self._setup_errors[carrier] = message
+        else:
+            self._setup_errors.pop(carrier, None)
 
     # -- transports ---------------------------------------------------------- #
 

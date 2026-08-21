@@ -452,7 +452,7 @@ class LinkDaemon:
             usable, why = await asyncio.to_thread(probe_shared_dir, shared)
             if not usable:
                 _log(f"[{room.name}] shared folder unusable: {why}")
-                room.setup_error = f"shared folder unusable: {why}"
+                room.note_setup_error("file", f"shared folder unusable: {why}")
                 shared = None
 
         if shared:
@@ -517,9 +517,8 @@ class LinkDaemon:
             remote = check_remote(remote)
         except BadRemote as exc:
             _log(f"[{room.name}] git channel unusable: {exc}")
-            room.setup_error = "; ".join(
-                p for p in (room.setup_error, f"git channel unusable: {clean_text(str(exc), 200)}") if p
-            )
+            room.note_setup_error(
+                "git", f"git channel unusable: {clean_text(str(exc), 200)}")
             return
 
         branch = (record.get("git_branch") or self.cfg.get("git_branch")
@@ -573,18 +572,22 @@ class LinkDaemon:
             # carrying it, and a room that refuses to start is worse than one
             # that starts and says which of its transports is broken.
             _log(f"[{room.name}] git channel unusable: {exc}")
-            # Appended, not assigned: a room can have a broken folder *and* a
-            # broken repo, and hiding the first behind the second would send
-            # somebody to fix one thing and leave the other in place.
-            room.setup_error = "; ".join(
-                p for p in (room.setup_error, f"git channel unusable: {clean_text(str(exc), 200)}") if p
-            )
+            # Per carrier, not appended: a room can have a broken folder *and*
+            # a broken repo and both must show, but this line runs again on
+            # every retry below, and joining each failure onto the last grew
+            # `setup_error` for as long as the remote stayed down.
+            room.note_setup_error(
+                "git", f"git channel unusable: {clean_text(str(exc), 200)}")
             # Transient by nature -- a DNS hiccup, a slow first clone, a remote
             # briefly refusing. Keep trying rather than leaving the room without
             # its transport until somebody notices and restarts the daemon.
             self._schedule_git_retry(room, record, keys)
             return
         room._git_retry_attempt = 0
+        # The channel is up, so whatever the last failure said is no longer
+        # true. Without this a room that recovered on the retry ladder kept
+        # `link_status` reporting it broken for the life of the daemon.
+        room.note_setup_error("git", None)
         room.attach("git", transport)
         _log(f"[{room.name}] git channel active on {branch} of "
              f"{redact_remote(remote)}")

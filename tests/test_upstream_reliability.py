@@ -152,16 +152,24 @@ class SeedCtrlPortCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class FakeRoom:
-    """Enough Room for the retry loop, with the real Room.stop bound on."""
+    """Enough Room for the retry loop, with the real Room methods bound on."""
 
     name = "test-room"
+    # The real property and the real writer, so the error bookkeeping under
+    # test is the shipped one rather than a restatement of it.
+    setup_error = Room.setup_error
+    note_setup_error = Room.note_setup_error
 
     def __init__(self) -> None:
         self._t: dict[str, object] = {}
         self._transports: dict[str, object] = {}
+        self._setup_errors: dict[str, str] = {}
 
     def transport(self, name: str):
         return self._t.get(name)
+
+    def attach(self, name: str, transport: object) -> None:
+        self._t[name] = transport
 
     async def stop(self) -> None:
         await Room.stop(self)
@@ -332,6 +340,135 @@ class CliSurfaceCase(unittest.TestCase):
     def test_a_sensible_timeout_is_accepted(self) -> None:
         args = _cli.build_parser().parse_args(["send", "--timeout", "5.5", "hi"])
         self.assertAlmostEqual(args.timeout, 5.5)
+
+
+# --------------------------------------------------------------------------- #
+# 4. the retry does not turn setup_error into a landfill
+# --------------------------------------------------------------------------- #
+
+class SetupErrorCase(unittest.IsolatedAsyncioTestCase):
+    """What the retry ladder does to the string `link_status` prints.
+
+    `_attach_git` used to join each failure onto the last. That was right
+    while a failed attach happened once per room, and became a leak the
+    moment it was retried: an unreachable remote appended a clause every
+    300 s for as long as it stayed down, and `link_status` prints the result
+    untruncated (`link/mcp_server.py`), so the same sentence arrived in a
+    model's context a few hundred times over. The other half was that
+    nothing cleared it, so a room that recovered went on reporting itself
+    broken for the life of the daemon.
+
+    These drive the real `_attach_git` and the real `_schedule_git_retry`,
+    stubbing only the transport, so they fail against the appending version.
+    """
+
+    def setUp(self) -> None:
+        self._constants = (_daemon.GIT_RETRY_BASE_S,
+                           _daemon.GIT_RETRY_MAX_S,
+                           _daemon.GIT_RETRY_FACTOR)
+        _daemon.GIT_RETRY_BASE_S = 0.01
+        _daemon.GIT_RETRY_MAX_S = 0.01
+        _daemon.GIT_RETRY_FACTOR = 1.0
+        from link import transport_git as tg
+        self._tg = tg
+        self._saved = (tg.GitTransport, tg.check_remote)
+        tg.check_remote = lambda remote: remote
+
+    def tearDown(self) -> None:
+        (_daemon.GIT_RETRY_BASE_S,
+         _daemon.GIT_RETRY_MAX_S,
+         _daemon.GIT_RETRY_FACTOR) = self._constants
+        self._tg.GitTransport, self._tg.check_remote = self._saved
+
+    def daemon(self):
+        stub = types.SimpleNamespace(
+            _stopping=asyncio.Event(),
+            cfg={"git_start_timeout_s": 5},
+            identity=types.SimpleNamespace(device_id="dev_test"),
+        )
+        stub._attach_git = types.MethodType(_daemon.LinkDaemon._attach_git, stub)
+        stub._schedule_git_retry = types.MethodType(
+            _daemon.LinkDaemon._schedule_git_retry, stub)
+        return stub
+
+    def transport(self, fails_for: int):
+        """A git transport whose start() fails the first `fails_for` times."""
+        tries = []
+
+        class Stub:
+            def __init__(self, **kwargs):
+                pass
+
+            async def start(self):
+                tries.append(1)
+                if len(tries) <= fails_for:
+                    raise OSError("Could not resolve host: github.com")
+
+            async def stop(self, flush=True):
+                pass
+
+        self._tg.GitTransport = Stub
+        return tries
+
+    async def drive(self, room, seconds: float = 0.4):
+        record = {"git_remote": "https://github.com/example/carrier.git"}
+        keys = types.SimpleNamespace(room_id="room_test")
+        await self.daemon()._attach_git(room, record, keys)
+        await asyncio.sleep(seconds)
+        task = getattr(room, "_git_retry_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def test_a_long_outage_does_not_grow_the_error(self) -> None:
+        tries = self.transport(fails_for=10_000)
+        room = FakeRoom()
+        await self.drive(room)
+        self.assertGreater(len(tries), 5, "the ladder should have run several times")
+        text = room.setup_error or ""
+        self.assertEqual(text.count("git channel unusable"), 1,
+                         f"one clause per carrier, got {text.count('git channel unusable')} "
+                         f"after {len(tries)} attempts")
+        self.assertLess(len(text), 200, "setup_error must not grow with the retries")
+
+    async def test_a_channel_that_comes_back_stops_reporting_itself_broken(self) -> None:
+        self.transport(fails_for=2)
+        room = FakeRoom()
+        await self.drive(room)
+        self.assertIsNotNone(room.transport("git"), "the stub should have come up")
+        self.assertIsNone(room.setup_error,
+                          "a recovered channel must clear its complaint")
+
+    async def test_a_broken_folder_is_not_hidden_by_the_git_retry(self) -> None:
+        # Why the original joined rather than assigned: two carriers can be
+        # broken at once, and fixing one of them is half a fix.
+        self.transport(fails_for=10_000)
+        room = FakeRoom()
+        room.note_setup_error("file", "shared folder unusable: no such path")
+        await self.drive(room)
+        text = room.setup_error or ""
+        self.assertIn("shared folder unusable", text,
+                      "the folder error must survive any number of git retries")
+        self.assertIn("git channel unusable", text)
+        self.assertEqual(text.count("git channel unusable"), 1)
+
+    async def test_the_folder_error_survives_a_git_recovery(self) -> None:
+        self.transport(fails_for=1)
+        room = FakeRoom()
+        room.note_setup_error("file", "shared folder unusable: no such path")
+        await self.drive(room)
+        self.assertIsNotNone(room.transport("git"))
+        self.assertEqual(room.setup_error, "shared folder unusable: no such path",
+                         "clearing the git clause must not clear the folder one")
+
+    def test_no_carriers_complaining_reads_as_none(self) -> None:
+        # `link_status` and the join reply both branch on falsiness, so an
+        # empty string here would render as a room that has something to say.
+        room = FakeRoom()
+        self.assertIsNone(room.setup_error)
+        room.note_setup_error("git", "git channel unusable: nope")
+        self.assertIsNotNone(room.setup_error)
+        room.note_setup_error("git", None)
+        self.assertIsNone(room.setup_error)
 
 
 if __name__ == "__main__":
